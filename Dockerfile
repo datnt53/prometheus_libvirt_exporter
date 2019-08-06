@@ -1,7 +1,9 @@
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
 ENV DEBIAN_FRONTEND noninteractive
 ENV EXPORTER_BASEDIR /opt/libvirt_exporter/
+ENV http_proxy=http://10.61.2.237:3128/
+ENV https_proxy=http://10.61.2.237:3128/
 
 RUN mkdir ${EXPORTER_BASEDIR}
 
