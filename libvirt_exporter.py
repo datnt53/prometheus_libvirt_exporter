@@ -1,4 +1,7 @@
+#!/usr/bin/env python3
+
 from __future__ import print_function
+import guestfs
 import sys
 import argparse
 import libvirt
@@ -77,44 +80,75 @@ def get_metrics_collections(metric_names, labels, stats):
 def get_metrics_multidim_collections(dom, device, **kwargs):
     tree = ElementTree.fromstring(dom.XMLDesc())
     targets = []
-
-    # for target in tree.findall("devices/" + device + "/target"):  # !
-    if device == 'disk':
-        for target in tree.findall("devices/" + device + "[@device='disk']/target"):
-            targets.append(target.get("dev"))
-    else:
-        for target in tree.findall("devices/" + device + "/target"):
-            targets.append(target.get("dev"))
-
+    df_list = ''
     all_metrics_collection = []
 
-    for target in targets:
-        metrics_collection = {}
-        stats = []
-        metric_names = []
-        labels = get_labels(dom)
-        if device == "disk":
-            labels['target_disk'] = target
-            if 'metric_names' in kwargs.keys():
-                stats = dom.blockInfo(target)
-                metric_names += kwargs['metric_names']
-            else:
-                disk_stats = dom.blockStatsFlags(target)
-                metric_names += disk_stats.keys()
-                stats = disk_stats.values()
+    if device == 'fs':
+        metric_names = kwargs['metric_names']
+        g = guestfs.GuestFS(python_return_dict=True)
+        g.add_libvirt_dom(dom=dom, readonly=True)
+        g.launch()
+        roots = g.inspect_os()
+        for root in roots:
+            mps = g.inspect_get_mountpoints(root)
 
-        elif device == "interface":
-            labels['target_interface'] = target
-            stats = dom.interfaceStats(target)
-            metric_names += kwargs['metric_names']
-
-        for mn in metric_names:
-            dimensions = []
+            for device in mps.keys():
+                g.mount_ro(mps[device], device)
+            df_list = g.df().splitlines(0)
+            g.umount_all()
+        for mount in df_list[1:]:
+            stats = []
+            metrics_collection = {}
+            labels = get_labels(dom)
+            fs_info = (" ".join(mount.split())).split(' ')
+            labels['filesystem'] = fs_info[0]
+            labels['mountpoint'] = fs_info[5]
+            stats += [fs_info[1], fs_info[2], fs_info[3], fs_info[4][:-1]]
             stats_af = dict(zip(metric_names, stats))
-            dimension = [stats_af[mn], labels]
-            dimensions.append(dimension)
-            metrics_collection[mn] = dimensions
-        all_metrics_collection.append(metrics_collection)
+
+            for mn in metric_names:
+                dimensions = []
+                dimension = [stats_af[mn], labels]
+                dimensions.append(dimension)
+                metrics_collection[mn] = dimensions
+            all_metrics_collection.append(metrics_collection)
+
+    else:
+    # for target in tree.findall("devices/" + device + "/target"):  # !
+        if device == 'disk':
+            for target in tree.findall("devices/" + device + "[@device='disk']/target"):
+                targets.append(target.get("dev"))
+        else:
+            for target in tree.findall("devices/" + device + "/target"):
+                targets.append(target.get("dev"))
+
+        for target in targets:
+            metrics_collection = {}
+            stats = []
+            metric_names = []
+            labels = get_labels(dom)
+            if device == "disk":
+                labels['target_disk'] = target
+                if 'metric_names' in kwargs.keys():
+                    stats = dom.blockInfo(target)
+                    metric_names += kwargs['metric_names']
+                else:
+                    disk_stats = dom.blockStatsFlags(target)
+                    metric_names += disk_stats.keys()
+                    stats = disk_stats.values()
+
+            elif device == "interface":
+                labels['target_interface'] = target
+                stats = dom.interfaceStats(target)
+                metric_names += kwargs['metric_names']
+
+            for mn in metric_names:
+                dimensions = []
+                stats_af = dict(zip(metric_names, stats))
+                dimension = [stats_af[mn], labels]
+                dimensions.append(dimension)
+                metrics_collection[mn] = dimensions
+            all_metrics_collection.append(metrics_collection)
     return all_metrics_collection
 
 
@@ -201,10 +235,9 @@ def add_metrics(dom, header_mn, g_dict):
         metric_names = ['capacity',
                         'allocation',
                         'physical']
-        metrics_interface = get_metrics_multidim_collections(dom, device="disk",
+        metrics_hd = get_metrics_multidim_collections(dom, device="disk",
                                                              metric_names=metric_names)
-        metrics_collection += metrics_interface
-
+        metrics_collection += metrics_hd
         unit = ""
 
     elif header_mn == "libvirt_interface_":
@@ -220,7 +253,17 @@ def add_metrics(dom, header_mn, g_dict):
         metrics_interface = get_metrics_multidim_collections(dom, device="interface",
                                                              metric_names=metric_names)
         metrics_collection += metrics_interface
+        unit = ""
 
+    elif header_mn == "libvirt_fs_":
+
+        metric_names = ['size',
+                        'used',
+                        'available',
+                        'used_percent']
+        metrics_fs = get_metrics_multidim_collections(dom, device="fs",
+                                                             metric_names=metric_names)
+        metrics_collection += metrics_fs
         unit = ""
 
     if metrics_collection:
@@ -262,7 +305,7 @@ def job(qemu_uri, g_dict, scheduler):
 
         headers_mn = ["libvirt_cpu_stats_", "libvirt_mem_stats_",
                       "libvirt_block_stats_", "libvirt_interface_",
-                      "libvirt_disk_"]
+                      "libvirt_disk_", "libvirt_fs_"]
 
         for header_mn in headers_mn:
             g_dict = add_metrics(dom, header_mn, g_dict)
